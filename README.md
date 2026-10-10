@@ -45,8 +45,11 @@ uv run python main.py -i video.mp4 -o vertical.mp4 --plan-only
 # Full control over encoding parameters
 uv run python main.py -i video.mp4 -o vertical.mp4 --crf 20 --preset medium
 
-# Use hardware encoder (macOS VideoToolbox / NVIDIA NVENC)
+# Use a hardware H.264 encoder when that device is present
 uv run python main.py -i video.mp4 -o vertical.mp4 --encoder hw
+
+# HEVC / H.265 (libx265). Smaller files than H.264 at the same quality name
+uv run python main.py -i video.mp4 -o vertical.mp4 --encoder hevc --crf 26 --preset medium
 
 # Maximum accuracy scene detection (slower)
 uv run python main.py -i video.mp4 -o vertical.mp4 --frame-skip 0
@@ -69,17 +72,19 @@ uv run python main.py -i video.mp4 -o vertical.mp4 --frame-skip 0
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--quality` | `balanced` | Preset: `fast`, `balanced`, or `high` (see table below) |
-| `--encoder` | `auto` | `auto` = libx264 (software), `hw` = hardware if available, or explicit name like `h264_videotoolbox` |
-| `--crf` | *(from quality)* | Override CRF directly, 0-51 lower = better (libx264 only) |
-| `--preset` | *(from quality)* | Override x264 preset directly: `ultrafast`..`veryslow` (libx264 only) |
+| `--encoder` | `auto` | `auto` = libx264. `hevc` = libx265. `hw` / `hevc_hw` = H.264 or HEVC hardware when that device is present. Or an explicit name: `libx264`, `libx265`, `h264_videotoolbox`, `h264_nvenc`, `hevc_videotoolbox`, `hevc_nvenc` |
+| `--crf` | *(from quality)* | Override CRF directly, 0-51, lower = better. Applies to libx264 and libx265 |
+| `--preset` | *(from quality)* | Override the x264/x265 preset: `ultrafast`..`veryslow` |
 
-**Quality presets (libx264):**
+**Quality presets:**
 
-| `--quality` | CRF | Preset | Typical use |
-|-------------|-----|--------|-------------|
-| `fast` | 28 | veryfast | Quick previews, drafts |
-| `balanced` | 23 | fast | Good quality, reasonable speed |
-| `high` | 18 | slow | Best quality, largest file, slowest |
+HEVC uses a CRF about 5 higher than H.264, which keeps the same quality name in a similar visual band. HEVC MP4 output is tagged `hvc1` so Apple players can open it.
+
+| `--quality` | H.264 CRF | HEVC CRF | Preset | Typical use |
+|-------------|-----------|----------|--------|-------------|
+| `fast` | 28 | 33 | veryfast | Quick previews, drafts |
+| `balanced` | 23 | 28 | fast | Good quality, reasonable speed |
+| `high` | 18 | 23 | slow | Best quality, largest file, slowest |
 
 **Scene detection tuning:**
 
@@ -103,7 +108,7 @@ uv run python main.py -i video.mp4 -o vertical.mp4 --frame-skip 0
 *   **Scene-by-Scene Processing:** Decisions are made per scene for consistent, logical edits.
 *   **Native Resolution:** Output height matches the source to prevent quality loss from upscaling.
 *   **Frame-Accurate Processing:** Every frame is processed individually with the correct per-scene strategy — no timestamp rounding or scene boundary drift.
-*   **Hardware Encoder Support:** Optional `--encoder hw` auto-detects VideoToolbox (macOS) or NVENC (NVIDIA) with automatic fallback to libx264.
+*   **H.264 and HEVC:** `--encoder hevc` writes H.265 with libx265. `--encoder hw` and `--encoder hevc_hw` use VideoToolbox or NVENC when that device is present, and otherwise fall back to libx264 or libx265.
 *   **VFR Handling:** Variable frame rate sources are automatically normalized before processing.
 *   **Audio Sync:** Non-zero stream start times are detected and compensated to keep audio/video aligned.
 
@@ -215,24 +220,24 @@ cog predict r8.im/darkvertex/autocrop-vertical \
   -i quality=high \
   -i crf=20 \
   -i preset=medium \
-  -i encoder=libx264 \
+  -i encoder=hevc \
   -o ./vertical.mp4
 ```
 
-`quality`, `crf`, `preset`, and `encoder` are the same encoding controls as the CLI. `crf` and `preset` replace the values chosen by `quality` for libx264. `-1` and `auto` leave that preset alone.
+`quality`, `crf`, `preset`, and `encoder` are the same encoding controls as the CLI. `crf` and `preset` replace the values chosen by `quality` for libx264 and libx265. `-1` and `auto` leave that preset alone. `encoder=hevc` writes H.265.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `video` | (required) | Horizontal video. Prefix local files with `@`. |
 | `ratio` | `9:16` | Output aspect ratio as `W:H` (`4:5`, `1:1`, …). |
 | `quality` | `balanced` | `fast` (CRF 28, veryfast), `balanced` (CRF 23, fast), or `high` (CRF 18, slow). |
-| `crf` | `-1` | libx264 CRF override, 0–51, lower is higher quality. `-1` keeps the quality preset. |
-| `preset` | `auto` | libx264 preset override (`ultrafast` … `veryslow`). `auto` keeps the quality preset. |
-| `encoder` | `auto` | `auto` or `libx264` uses software x264. `hw` uses VideoToolbox or NVENC when the machine has it. |
+| `crf` | `-1` | libx264 or libx265 CRF override, 0–51, lower is higher quality. `-1` keeps the quality preset. |
+| `preset` | `auto` | libx264 or libx265 preset override (`ultrafast` … `veryslow`). `auto` keeps the quality preset. |
+| `encoder` | `auto` | `auto` / `libx264` = H.264. `hevc` / `libx265` = H.265. `hw` / `hevc_hw` = hardware when that device is present. |
 | `frame_skip` | `0` | Frames skipped during scene detection. |
 | `downscale` | `0` | Scene-detection downscale. `0` is automatic. |
 
-This image is built for CPU, so `hw` resolves to libx264 here. A local checkout can still pass `--encoder h264_videotoolbox` or `--encoder h264_nvenc`.
+This image is built for CPU, so `hw` stays on libx264 and `hevc_hw` stays on libx265. A machine with VideoToolbox or NVENC can use those hardware encoders by name.
 
 ### Push your own build
 
@@ -265,6 +270,7 @@ uvx --from poethepoet poe cog-deploy
 *   **uv project.** `requirements.txt` is replaced by `pyproject.toml` and `uv.lock`. Dependencies install with `uv sync`. PyTorch resolves from the CPU wheel index.
 *   **Single-shot videos.** Scene detection now treats a video with no cuts as one scene, so a clip without a camera change still gets cropped.
 *   **Encoding controls on the API.** `quality`, `crf`, `preset`, and `encoder` are inputs on the Replicate model, matching the CLI flags.
+*   **HEVC output.** `--encoder hevc` (and `encoder=hevc` on Replicate) encodes with libx265 and tags the MP4 `hvc1`. `hevc_hw` uses HEVC VideoToolbox or NVENC when that device is present.
 
 
 

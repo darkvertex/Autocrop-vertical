@@ -51,13 +51,13 @@ class Predictor(BasePredictor):
             choices=["fast", "balanced", "high"],
         ),
         crf: int = Input(
-            description="libx264 CRF override, 0-51, lower is higher quality. -1 keeps the quality preset.",
+            description="libx264 or libx265 CRF override, 0-51, lower is higher quality. -1 keeps the quality preset.",
             default=-1,
             ge=-1,
             le=51,
         ),
         preset: str = Input(
-            description="libx264 preset override. 'auto' keeps the quality preset.",
+            description="libx264 or libx265 preset override. 'auto' keeps the quality preset.",
             default="auto",
             choices=["auto", *X264_PRESETS],
         ),
@@ -75,11 +75,13 @@ class Predictor(BasePredictor):
         ),
         encoder: str = Input(
             description=(
-                "Video encoder. 'auto' uses libx264. 'hw' uses VideoToolbox or NVENC when "
-                "this machine has one, otherwise libx264. CRF and preset overrides apply to libx264."
+                "Video encoder. 'auto' and 'libx264' are H.264. 'hevc' and 'libx265' are "
+                "H.265. 'hw' and 'hevc_hw' use VideoToolbox or NVENC when that device is "
+                "present, otherwise the matching software encoder. CRF and preset overrides "
+                "apply to libx264 and libx265."
             ),
             default="auto",
-            choices=["auto", "libx264", "hw"],
+            choices=["auto", "libx264", "hevc", "libx265", "hw", "hevc_hw"],
         ),
     ) -> Path:
         """Crop the video to a vertical frame, tracking people when they fit."""

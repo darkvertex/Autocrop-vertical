@@ -11,6 +11,7 @@ from main import (
     detect_scenes,
     parse_aspect_ratio,
     process_video,
+    resolve_encoder,
 )
 
 
@@ -97,6 +98,42 @@ def test_crf_and_preset_override_quality():
 def test_hardware_presets_ignore_libx264_overrides():
     args = build_encoder_args("nvenc", "fast", crf_override=10, preset_override="slow")
     assert args == ["-cq", "28", "-preset", "p1"]
+
+
+def test_hevc_quality_presets_are_higher_crf_and_tagged():
+    assert build_encoder_args("libx265", "fast") == ["-crf", "33", "-preset", "veryfast", "-tag:v", "hvc1"]
+    assert build_encoder_args("libx265", "balanced") == ["-crf", "28", "-preset", "fast", "-tag:v", "hvc1"]
+    assert build_encoder_args("libx265", "high") == ["-crf", "23", "-preset", "slow", "-tag:v", "hvc1"]
+
+
+def test_hevc_crf_and_preset_override_keep_hvc1_tag():
+    args = build_encoder_args("libx265", "balanced", crf_override=26, preset_override="medium")
+    assert args == ["-crf", "26", "-preset", "medium", "-tag:v", "hvc1"]
+
+
+def test_hevc_aliases_and_hardware_fallback():
+    assert resolve_encoder("hevc", available=set()) == ("libx265", "libx265")
+    assert resolve_encoder("libx265", available=set()) == ("libx265", "libx265")
+    assert resolve_encoder("hevc_hw", available=set()) == ("libx265", "libx265")
+    # Listed by FFmpeg but no device: stay on the software encoder.
+    assert resolve_encoder("hevc_hw", available={"hevc_nvenc"}, usable=lambda _name: False) == ("libx265", "libx265")
+    assert resolve_encoder(
+        "hevc_hw",
+        available={"hevc_videotoolbox", "hevc_nvenc"},
+        usable=lambda name: name == "hevc_nvenc",
+    ) == ("hevc_nvenc", "hevc_nvenc")
+    assert resolve_encoder(
+        "hw",
+        available={"h264_videotoolbox", "h264_nvenc"},
+        usable=lambda name: name == "h264_nvenc",
+    ) == ("h264_nvenc", "nvenc")
+    assert resolve_encoder("auto", available={"hevc_nvenc", "h264_nvenc"}) == ("libx264", "libx264")
+
+
+def test_explicit_hardware_encoder_uses_its_preset_family():
+    assert resolve_encoder("h264_nvenc", available=set()) == ("h264_nvenc", "nvenc")
+    assert resolve_encoder("hevc_videotoolbox", available=set()) == ("hevc_videotoolbox", "hevc_videotoolbox")
+    assert build_encoder_args("hevc_nvenc", "balanced") == ["-cq", "28", "-preset", "p4", "-tag:v", "hvc1"]
 
 
 def test_unknown_encoder_fails_before_decoding(tmp_path):

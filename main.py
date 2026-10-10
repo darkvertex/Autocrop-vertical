@@ -341,50 +341,101 @@ def normalize_to_cfr(video_path, output_path, total_duration=0):
         return False
     return True
 
-def detect_hw_encoder():
-    """Probes FFmpeg for available hardware H.264 encoders.
+# FFmpeg encoder name -> preset family used by build_encoder_args.
+ENCODER_FAMILIES = {
+    'libx264': 'libx264',
+    'h264_videotoolbox': 'videotoolbox',
+    'h264_nvenc': 'nvenc',
+    'libx265': 'libx265',
+    'hevc_videotoolbox': 'hevc_videotoolbox',
+    'hevc_nvenc': 'hevc_nvenc',
+}
+H264_HW_CANDIDATES = ('h264_videotoolbox', 'h264_nvenc')
+HEVC_HW_CANDIDATES = ('hevc_videotoolbox', 'hevc_nvenc')
+_ffmpeg_encoders = None
 
-    Returns (encoder_name, encoder_type) where encoder_type is one of
-    'videotoolbox', 'nvenc', or 'libx264'.
-    """
-    candidates = [
-        ('h264_videotoolbox', 'videotoolbox'),
-        ('h264_nvenc',        'nvenc'),
-    ]
-    for encoder, etype in candidates:
+
+def ffmpeg_encoders():
+    """Return the set of video encoder names compiled into this FFmpeg."""
+    global _ffmpeg_encoders
+    if _ffmpeg_encoders is None:
+        found = set()
         try:
             result = subprocess.run(
                 ['ffmpeg', '-hide_banner', '-encoders'],
                 capture_output=True, text=True
             )
-            if encoder in result.stdout:
-                return encoder, etype
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    # Encoder rows look like " V....D libx265  libx265 H.265 / HEVC".
+                    if (len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] == 'V'
+                            and parts[1].replace('_', '').isalnum()):
+                        found.add(parts[1])
         except FileNotFoundError:
-            break
-    return 'libx264', 'libx264'
+            pass
+        _ffmpeg_encoders = found
+    return _ffmpeg_encoders
 
-def resolve_encoder(requested, hw_encoder_name, hw_encoder_type):
-    """Resolves which encoder to use based on user request.
 
-    requested: 'auto' (default, always libx264 for quality), 'hw' (use hardware
-               if available), or a specific encoder name like 'h264_videotoolbox'.
-    Returns (encoder_name, encoder_type).
+def hardware_encoder_usable(encoder_name):
+    """True when the hardware device for this encoder is present.
+
+    FFmpeg lists NVENC and VideoToolbox whenever they were compiled in, even
+    on a machine that cannot run them.
     """
-    if requested == 'auto':
+    if encoder_name.endswith('_videotoolbox'):
+        return sys.platform == 'darwin'
+    if encoder_name.endswith('_nvenc'):
+        return os.path.exists('/dev/nvidia0') or os.path.exists('/dev/nvidiactl')
+    return False
+
+
+def first_usable_encoder(candidates, fallback, available=None, usable=None):
+    """Pick the first compiled, usable encoder, or `fallback`."""
+    if available is None:
+        available = ffmpeg_encoders()
+    if usable is None:
+        usable = hardware_encoder_usable
+    for name in candidates:
+        if name in available and usable(name):
+            return name
+    return fallback
+
+
+def resolve_encoder(requested, available=None, usable=None):
+    """Resolve a user encoder choice to (ffmpeg_encoder_name, preset_family).
+
+    `auto` is libx264. `hw` is a usable H.264 hardware encoder, or libx264.
+    `hevc` is libx265. `hevc_hw` is a usable HEVC hardware encoder, or libx265.
+    Explicit names such as `h264_nvenc` and `hevc_videotoolbox` are also accepted.
+    """
+    if available is None:
+        available = ffmpeg_encoders()
+    choice = (requested or 'auto').strip()
+    if choice == 'auto':
         return 'libx264', 'libx264'
-    elif requested == 'hw':
-        return hw_encoder_name, hw_encoder_type
-    else:
-        # User specified an explicit encoder
-        if requested == hw_encoder_name:
-            return hw_encoder_name, hw_encoder_type
-        return requested, requested
+    if choice == 'hw':
+        name = first_usable_encoder(H264_HW_CANDIDATES, 'libx264', available, usable)
+        return name, ENCODER_FAMILIES[name]
+    if choice in ('hevc', 'libx265'):
+        return 'libx265', 'libx265'
+    if choice == 'hevc_hw':
+        name = first_usable_encoder(HEVC_HW_CANDIDATES, 'libx265', available, usable)
+        return name, ENCODER_FAMILIES[name]
+    if choice in ENCODER_FAMILIES:
+        return choice, ENCODER_FAMILIES[choice]
+    known = ', '.join(['auto', 'hw', 'hevc', 'hevc_hw', *ENCODER_FAMILIES])
+    raise ProcessingError(f"Unsupported encoder '{requested}'. Use one of: {known}.")
+
 
 def build_encoder_args(encoder_type, quality_level, crf_override=None, preset_override=None):
     """Returns a list of FFmpeg encoder arguments for the given encoder and quality.
 
     quality_level is one of 'fast', 'balanced', 'high'.
-    crf_override and preset_override allow user to force specific values (libx264 only).
+    crf_override and preset_override apply to libx264 and libx265.
+    HEVC CRF targets sit about 5 higher than H.264 so the same quality name
+    stays in a similar visual band. HEVC MP4 output is tagged hvc1.
     """
     presets = {
         'libx264': {
@@ -392,22 +443,37 @@ def build_encoder_args(encoder_type, quality_level, crf_override=None, preset_ov
             'balanced': ['-crf', '23', '-preset', 'fast'],
             'high':     ['-crf', '18', '-preset', 'slow'],
         },
+        'libx265': {
+            'fast':     ['-crf', '33', '-preset', 'veryfast', '-tag:v', 'hvc1'],
+            'balanced': ['-crf', '28', '-preset', 'fast', '-tag:v', 'hvc1'],
+            'high':     ['-crf', '23', '-preset', 'slow', '-tag:v', 'hvc1'],
+        },
         'videotoolbox': {
             'fast':     ['-b:v', '3M', '-allow_sw', '1', '-realtime', '0'],
             'balanced': ['-b:v', '6M', '-allow_sw', '1', '-realtime', '0'],
             'high':     ['-b:v', '12M', '-allow_sw', '1', '-realtime', '0'],
+        },
+        'hevc_videotoolbox': {
+            'fast':     ['-b:v', '2M', '-allow_sw', '1', '-realtime', '0', '-tag:v', 'hvc1'],
+            'balanced': ['-b:v', '4M', '-allow_sw', '1', '-realtime', '0', '-tag:v', 'hvc1'],
+            'high':     ['-b:v', '8M', '-allow_sw', '1', '-realtime', '0', '-tag:v', 'hvc1'],
         },
         'nvenc': {
             'fast':     ['-cq', '28', '-preset', 'p1'],
             'balanced': ['-cq', '23', '-preset', 'p4'],
             'high':     ['-cq', '18', '-preset', 'p7'],
         },
+        'hevc_nvenc': {
+            'fast':     ['-cq', '33', '-preset', 'p1', '-tag:v', 'hvc1'],
+            'balanced': ['-cq', '28', '-preset', 'p4', '-tag:v', 'hvc1'],
+            'high':     ['-cq', '23', '-preset', 'p7', '-tag:v', 'hvc1'],
+        },
     }
 
     args = list(presets[encoder_type][quality_level])
 
-    # Allow user overrides for libx264
-    if encoder_type == 'libx264':
+    # libx264 and libx265 share CRF plus the ultrafast..veryslow preset names.
+    if encoder_type in ('libx264', 'libx265'):
         if crf_override is not None:
             args[args.index('-crf') + 1] = str(crf_override)
         if preset_override is not None:
@@ -439,22 +505,18 @@ def process_video(
         raise ProcessingError("CRF must be between 0 and 51")
     if preset is not None and preset not in X264_PRESETS:
         raise ProcessingError(
-            "Preset must be one of: " + ", ".join(X264_PRESETS)
+            "Preset must be an x264/x265 preset: " + ", ".join(X264_PRESETS)
         )
     if not os.path.isfile(input_path):
         raise ProcessingError(f"Input video not found: {input_path}")
 
-    # Resolve encoder: default is libx264 for best quality; --encoder hw for hardware
-    hw_encoder_name, hw_encoder_type = detect_hw_encoder()
-    encoder_name, encoder_type = resolve_encoder(encoder, hw_encoder_name, hw_encoder_type)
+    # auto/hw stay on H.264. hevc and hevc_hw select H.265.
+    encoder_name, encoder_type = resolve_encoder(encoder)
     try:
         enc_args = build_encoder_args(encoder_type, quality,
                                       crf_override=crf, preset_override=preset)
     except KeyError:
-        raise ProcessingError(
-            f"Unsupported encoder '{encoder}'. Use 'auto', 'hw', or an FFmpeg encoder name "
-            "known to this script (libx264, h264_videotoolbox, h264_nvenc)."
-        ) from None
+        raise ProcessingError(f"Unsupported encoder '{encoder}'.") from None
 
     # Defer heavy imports until after arg parsing so --help is instant
     import cv2
@@ -749,9 +811,9 @@ def build_parser():
     parser.add_argument('--quality', type=str, default='balanced', choices=['fast', 'balanced', 'high'],
                         help="Encoding quality preset (default: balanced). fast=quick encode, balanced=good quality, high=best quality/slow")
     parser.add_argument('--crf', type=int, default=None,
-                        help="Override CRF value directly (0-51, lower=better quality). Overrides --quality.")
+                        help="Override CRF directly (0-51, lower=better quality) for libx264 and libx265. Overrides --quality.")
     parser.add_argument('--preset', type=str, default=None,
-                        help="Override FFmpeg x264 preset directly (ultrafast..veryslow). Overrides --quality.")
+                        help="Override the x264/x265 preset directly (ultrafast..veryslow). Overrides --quality.")
     parser.add_argument('--plan-only', action='store_true',
                         help="Only run scene detection and analysis (Steps 1-3), then print the processing plan without encoding.")
     parser.add_argument('--frame-skip', type=int, default=0,
@@ -761,8 +823,10 @@ def build_parser():
                         help="Downscale factor for scene detection (default: 0 = auto). "
                              "Higher values (2-4) are faster but may miss subtle scene changes.")
     parser.add_argument('--encoder', type=str, default='auto',
-                        help="Video encoder: 'auto' (libx264, default), 'hw' (auto-detect hardware encoder), "
-                             "or a specific encoder name like 'h264_videotoolbox' or 'h264_nvenc'.")
+                        help="Video encoder: 'auto' (libx264), 'hevc' (libx265), "
+                             "'hw' or 'hevc_hw' (hardware H.264 or HEVC when that device is present), "
+                             "or an explicit name: libx264, libx265, h264_videotoolbox, h264_nvenc, "
+                             "hevc_videotoolbox, hevc_nvenc.")
     return parser
 
 
