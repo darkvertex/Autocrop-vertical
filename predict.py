@@ -51,7 +51,10 @@ class Predictor(BasePredictor):
             choices=["fast", "balanced", "high"],
         ),
         crf: int = Input(
-            description="libx264 or libx265 CRF override, 0-51, lower is higher quality. -1 keeps the quality preset.",
+            description=(
+                "Quality override, 0-51, lower is higher quality. Sets CRF for libx264 and "
+                "libx265, and CQ for NVENC. -1 keeps the quality preset."
+            ),
             default=-1,
             ge=-1,
             le=51,
@@ -75,12 +78,11 @@ class Predictor(BasePredictor):
         ),
         encoder: str = Input(
             description=(
-                "Video encoder. 'auto' and 'libx264' are H.264. 'hevc' and 'libx265' are "
-                "H.265. 'hw' and 'hevc_hw' use VideoToolbox or NVENC when that device is "
-                "present, otherwise the matching software encoder. CRF and preset overrides "
-                "apply to libx264 and libx265."
+                "Video encoder. 'hw' uses H.264 NVENC on a T4 or L40S and falls back to "
+                "libx264 when the GPU has no encoder. 'hevc_hw' is the HEVC equivalent. "
+                "'auto' and 'libx264' are software H.264. 'hevc' and 'libx265' are software H.265."
             ),
-            default="auto",
+            default="hw",
             choices=["auto", "libx264", "hevc", "libx265", "hw", "hevc_hw"],
         ),
     ) -> Path:

@@ -36,9 +36,8 @@ sequence = ["cog-build", "cog-push"]
 [tool.uv]
 package = false
 default-groups = ["dev"]
-# CPU PyTorch wheels. This pipeline is CPU-bound (scene detection, frame
-# crops, libx264). Override when you want CUDA YOLO inference:
-#   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# CPU PyTorch wheels for local runs and pytest. The Cog image is a GPU
+# build so NVENC can run; YOLO still uses this CPU wheel (one frame per scene).
 index-strategy = "unsafe-first-match"
 
 [[tool.uv.index]]

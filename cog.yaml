@@ -1,10 +1,15 @@
 # Replicate image for AutoCrop-Vertical.
-# CPU: scene detection, per-frame crop, and libx264 dominate runtime.
-# YOLOv8n runs on one frame per scene, so a GPU machine is not worth the cost.
+# GPU so FFmpeg can open h264_nvenc / hevc_nvenc. Cog's GPU image sets
+# NVIDIA_DRIVER_CAPABILITIES=all, which mounts libnvidia-encode from the host
+# driver. T4 and L40S have an NVENC engine; A100 and H100 do not, and the
+# pipeline falls back to libx264 / libx265 after a failed session probe.
+# cuda is pinned because Cog 0.22's compatibility matrix stops at torch 2.11
+# and this image keeps the CPU torch wheel (YOLO runs once per scene).
 image: r8.im/darkvertex/autocrop-vertical
 
 build:
-  gpu: false
+  gpu: true
+  cuda: "12.8"
   python_version: "3.12"
   system_packages:
     - ffmpeg

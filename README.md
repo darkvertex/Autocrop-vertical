@@ -73,12 +73,12 @@ uv run python main.py -i video.mp4 -o vertical.mp4 --frame-skip 0
 |------|---------|-------------|
 | `--quality` | `balanced` | Preset: `fast`, `balanced`, or `high` (see table below) |
 | `--encoder` | `auto` | `auto` = libx264. `hevc` = libx265. `hw` / `hevc_hw` = H.264 or HEVC hardware when that device is present. Or an explicit name: `libx264`, `libx265`, `h264_videotoolbox`, `h264_nvenc`, `hevc_videotoolbox`, `hevc_nvenc` |
-| `--crf` | *(from quality)* | Override CRF directly, 0-51, lower = better. Applies to libx264 and libx265 |
+| `--crf` | *(from quality)* | Override quality directly, 0-51, lower = better. CRF for libx264 and libx265, CQ for NVENC |
 | `--preset` | *(from quality)* | Override the x264/x265 preset: `ultrafast`..`veryslow` |
 
 **Quality presets:**
 
-HEVC uses a CRF about 5 higher than H.264, which keeps the same quality name in a similar visual band. HEVC MP4 output is tagged `hvc1` so Apple players can open it.
+HEVC uses a CRF about 5 higher than H.264, which keeps the same quality name in a similar visual band. HEVC MP4 output is tagged `hvc1` so Apple players can open it. NVENC uses those same numbers as CQ, with unconstrained VBR (`-rc vbr -cq N -b:v 0`).
 
 | `--quality` | H.264 CRF | HEVC CRF | Preset | Typical use |
 |-------------|-----------|----------|--------|-------------|
@@ -108,7 +108,7 @@ HEVC uses a CRF about 5 higher than H.264, which keeps the same quality name in 
 *   **Scene-by-Scene Processing:** Decisions are made per scene for consistent, logical edits.
 *   **Native Resolution:** Output height matches the source to prevent quality loss from upscaling.
 *   **Frame-Accurate Processing:** Every frame is processed individually with the correct per-scene strategy — no timestamp rounding or scene boundary drift.
-*   **H.264 and HEVC:** `--encoder hevc` writes H.265 with libx265. `--encoder hw` and `--encoder hevc_hw` use VideoToolbox or NVENC when that device is present, and otherwise fall back to libx264 or libx265.
+*   **H.264 and HEVC:** `--encoder hevc` writes H.265 with libx265. `--encoder hw` and `--encoder hevc_hw` use VideoToolbox or NVENC when a one-frame session opens, and otherwise fall back to libx264 or libx265.
 *   **VFR Handling:** Variable frame rate sources are automatically normalized before processing.
 *   **Audio Sync:** Non-zero stream start times are detected and compensated to keep audio/video aligned.
 
@@ -194,7 +194,7 @@ This script is built on a pipeline that uses specialized libraries for each step
 
 This fork publishes a Cog image at [replicate.com/darkvertex/autocrop-vertical](https://replicate.com/darkvertex/autocrop-vertical). Local `cog predict` and that hosted model return the same vertical mp4.
 
-The image is CPU-only. Scene detection, the per-frame crop, and libx264 are the slow parts; YOLOv8n runs on a single frame per scene. The build downloads `yolov8n.pt` in `cog.yaml`, so cold boots do no network I/O. `predict.py` sets `YOLO_OFFLINE=1` and refuses to start if those weights are missing.
+The image is a GPU build (`gpu: true`, CUDA 12.8) so FFmpeg can open NVENC. PyTorch stays on the CPU wheel: YOLOv8n runs on one frame per scene, and the GPU is there for `h264_nvenc` and `hevc_nvenc`. Set the model hardware to an Nvidia T4 or L40S. Those cards have an NVENC engine. A100 and H100 have decode only, and `hw` / `hevc_hw` fall back to libx264 / libx265 after a failed session probe. The build downloads `yolov8n.pt` in `cog.yaml`, so cold boots do no network I/O. `predict.py` sets `YOLO_OFFLINE=1` and refuses to start if those weights are missing.
 
 Install the [Cog CLI](https://cog.run/getting-started/) and Docker.
 
@@ -233,11 +233,9 @@ cog predict r8.im/darkvertex/autocrop-vertical \
 | `quality` | `balanced` | `fast` (CRF 28, veryfast), `balanced` (CRF 23, fast), or `high` (CRF 18, slow). |
 | `crf` | `-1` | libx264 or libx265 CRF override, 0–51, lower is higher quality. `-1` keeps the quality preset. |
 | `preset` | `auto` | libx264 or libx265 preset override (`ultrafast` … `veryslow`). `auto` keeps the quality preset. |
-| `encoder` | `auto` | `auto` / `libx264` = H.264. `hevc` / `libx265` = H.265. `hw` / `hevc_hw` = hardware when that device is present. |
+| `encoder` | `hw` | `hw` = H.264 NVENC on a T4 or L40S, otherwise libx264. `hevc_hw` = HEVC NVENC, otherwise libx265. `auto` / `libx264` = software H.264. `hevc` / `libx265` = software H.265. |
 | `frame_skip` | `0` | Frames skipped during scene detection. |
 | `downscale` | `0` | Scene-detection downscale. `0` is automatic. |
-
-This image is built for CPU, so `hw` stays on libx264 and `hevc_hw` stays on libx265. A machine with VideoToolbox or NVENC can use those hardware encoders by name.
 
 ### Push your own build
 
@@ -257,7 +255,7 @@ uvx --from poethepoet poe cog-deploy
 
 ### GitHub Actions
 
-- `.github/workflows/cog-build.yml` runs on every pull request: `pytest` and `cog build` plus a CPU `cog predict` smoke test, in parallel. Nothing is pushed.
+- `.github/workflows/cog-build.yml` runs on every pull request: `pytest` and `cog build` plus a `cog predict` smoke test, in parallel. Nothing is pushed. The GitHub runner has no NVIDIA driver, so the default `hw` encoder falls back to libx264 there.
 - `.github/workflows/cog-release.yml` runs on every push to `main` (or manually): `cog build` then `cog push`. It runs in the `production` GitHub Environment and needs the secret `REPLICATE_CLI_AUTH_TOKEN` defined there (Settings > Environments > production). The value must be the CLI auth token copied from https://replicate.com/auth/token, not an API token (`r8_...`) from the account settings page: `cog login` rejects API tokens. The job fails early with a clear message if the secret is missing or is an API token.
 
 ---
@@ -266,11 +264,12 @@ uvx --from poethepoet poe cog-deploy
 
 #### v1.5.0 — Replicate model and uv
 
-*   **Hosted Cog model.** `cog.yaml` and `predict.py` run the same pipeline as the CLI. Weights are baked into the image. CI builds the image and smoke-tests a short vertical encode; pushes to `main` publish `r8.im/darkvertex/autocrop-vertical`.
+*   **Hosted Cog model.** `cog.yaml` and `predict.py` run the same pipeline as the CLI. The image is a GPU build so NVENC can run on a T4 or L40S. Weights are baked into the image. CI builds the image and smoke-tests a short vertical encode; pushes to `main` publish `r8.im/darkvertex/autocrop-vertical`.
 *   **uv project.** `requirements.txt` is replaced by `pyproject.toml` and `uv.lock`. Dependencies install with `uv sync`. PyTorch resolves from the CPU wheel index.
 *   **Single-shot videos.** Scene detection now treats a video with no cuts as one scene, so a clip without a camera change still gets cropped.
 *   **Encoding controls on the API.** `quality`, `crf`, `preset`, and `encoder` are inputs on the Replicate model, matching the CLI flags.
-*   **HEVC output.** `--encoder hevc` (and `encoder=hevc` on Replicate) encodes with libx265 and tags the MP4 `hvc1`. `hevc_hw` uses HEVC VideoToolbox or NVENC when that device is present.
+*   **HEVC output.** `--encoder hevc` (and `encoder=hevc` on Replicate) encodes with libx265 and tags the MP4 `hvc1`. `hevc_hw` uses HEVC VideoToolbox or NVENC when a one-frame session opens.
+*   **NVENC on the hosted model.** `encoder` defaults to `hw`. On a T4 or L40S that selects `h264_nvenc`. On an A100, H100, or a machine with no NVIDIA device, it stays on libx264.
 
 
 

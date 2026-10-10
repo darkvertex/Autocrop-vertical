@@ -9,6 +9,8 @@ from main import (
     calculate_crop_box,
     decide_cropping_strategy,
     detect_scenes,
+    hardware_encoder_usable,
+    nvenc_session_opens,
     parse_aspect_ratio,
     process_video,
     resolve_encoder,
@@ -95,9 +97,9 @@ def test_crf_and_preset_override_quality():
     assert args == ["-crf", "20", "-preset", "medium"]
 
 
-def test_hardware_presets_ignore_libx264_overrides():
+def test_nvenc_crf_override_sets_cq_and_ignores_x264_preset():
     args = build_encoder_args("nvenc", "fast", crf_override=10, preset_override="slow")
-    assert args == ["-cq", "28", "-preset", "p1"]
+    assert args == ["-rc", "vbr", "-cq", "10", "-b:v", "0", "-preset", "p1"]
 
 
 def test_hevc_quality_presets_are_higher_crf_and_tagged():
@@ -133,7 +135,44 @@ def test_hevc_aliases_and_hardware_fallback():
 def test_explicit_hardware_encoder_uses_its_preset_family():
     assert resolve_encoder("h264_nvenc", available=set()) == ("h264_nvenc", "nvenc")
     assert resolve_encoder("hevc_videotoolbox", available=set()) == ("hevc_videotoolbox", "hevc_videotoolbox")
-    assert build_encoder_args("hevc_nvenc", "balanced") == ["-cq", "28", "-preset", "p4", "-tag:v", "hvc1"]
+    assert build_encoder_args("hevc_nvenc", "balanced") == [
+        "-rc", "vbr", "-cq", "28", "-b:v", "0", "-preset", "p4", "-tag:v", "hvc1",
+    ]
+
+
+def test_nvenc_needs_a_device_and_an_open_session():
+    assert hardware_encoder_usable(
+        "h264_nvenc",
+        device_present=lambda: False,
+        session_opens=lambda _name: True,
+    ) is False
+    assert hardware_encoder_usable(
+        "h264_nvenc",
+        device_present=lambda: True,
+        session_opens=lambda name: name == "h264_nvenc",
+    ) is True
+    # A100 and H100 have a device node and no encoder. The session probe fails.
+    assert hardware_encoder_usable(
+        "hevc_nvenc",
+        device_present=lambda: True,
+        session_opens=lambda _name: False,
+    ) is False
+
+
+def test_nvenc_session_probe_reads_ffmpeg_status():
+    def succeed(command, **_kwargs):
+        assert command[command.index("-c:v") + 1] == "h264_nvenc"
+        return subprocess.CompletedProcess(command, 0)
+
+    def fail(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 1)
+
+    def time_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("ffmpeg", 30)
+
+    assert nvenc_session_opens("h264_nvenc", run=succeed) is True
+    assert nvenc_session_opens("hevc_nvenc", run=fail) is False
+    assert nvenc_session_opens("av1_nvenc", run=time_out) is False
 
 
 def test_unknown_encoder_fails_before_decoding(tmp_path):

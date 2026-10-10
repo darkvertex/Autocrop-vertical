@@ -378,8 +378,43 @@ def ffmpeg_encoders():
     return _ffmpeg_encoders
 
 
-def hardware_encoder_usable(encoder_name):
-    """True when the hardware device for this encoder is present.
+_nvenc_session_cache = {}
+
+
+def nvenc_device_present():
+    """True when the NVIDIA driver has exposed a GPU device node."""
+    return os.path.exists('/dev/nvidia0') or os.path.exists('/dev/nvidiactl')
+
+
+def nvenc_session_opens(encoder_name, run=None):
+    """True when FFmpeg can open a one-frame NVENC session.
+
+    A100 and H100 expose a device node and still have no NVENC engine, so the
+    device check alone would select an encoder that then fails the job.
+    """
+    if run is None and encoder_name in _nvenc_session_cache:
+        return _nvenc_session_cache[encoder_name]
+    if run is None:
+        run = subprocess.run
+    command = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'color=black:s=64x64:r=30:d=0.04',
+        '-frames:v', '1',
+        '-c:v', encoder_name,
+        '-f', 'null', '-',
+    ]
+    try:
+        result = run(command, capture_output=True, timeout=30)
+        ok = result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if run is subprocess.run:
+        _nvenc_session_cache[encoder_name] = ok
+    return ok
+
+
+def hardware_encoder_usable(encoder_name, device_present=None, session_opens=None):
+    """True when this hardware encoder can encode a frame on this machine.
 
     FFmpeg lists NVENC and VideoToolbox whenever they were compiled in, even
     on a machine that cannot run them.
@@ -387,7 +422,11 @@ def hardware_encoder_usable(encoder_name):
     if encoder_name.endswith('_videotoolbox'):
         return sys.platform == 'darwin'
     if encoder_name.endswith('_nvenc'):
-        return os.path.exists('/dev/nvidia0') or os.path.exists('/dev/nvidiactl')
+        present = nvenc_device_present if device_present is None else device_present
+        if not present():
+            return False
+        opens = nvenc_session_opens if session_opens is None else session_opens
+        return bool(opens(encoder_name))
     return False
 
 
@@ -433,9 +472,11 @@ def build_encoder_args(encoder_type, quality_level, crf_override=None, preset_ov
     """Returns a list of FFmpeg encoder arguments for the given encoder and quality.
 
     quality_level is one of 'fast', 'balanced', 'high'.
-    crf_override and preset_override apply to libx264 and libx265.
+    crf_override applies to libx264, libx265, and NVENC (as CQ).
+    preset_override applies to libx264 and libx265.
     HEVC CRF targets sit about 5 higher than H.264 so the same quality name
     stays in a similar visual band. HEVC MP4 output is tagged hvc1.
+    NVENC uses unconstrained VBR so CQ, not a default bitrate cap, sets the size.
     """
     presets = {
         'libx264': {
@@ -459,25 +500,28 @@ def build_encoder_args(encoder_type, quality_level, crf_override=None, preset_ov
             'high':     ['-b:v', '8M', '-allow_sw', '1', '-realtime', '0', '-tag:v', 'hvc1'],
         },
         'nvenc': {
-            'fast':     ['-cq', '28', '-preset', 'p1'],
-            'balanced': ['-cq', '23', '-preset', 'p4'],
-            'high':     ['-cq', '18', '-preset', 'p7'],
+            'fast':     ['-rc', 'vbr', '-cq', '28', '-b:v', '0', '-preset', 'p1'],
+            'balanced': ['-rc', 'vbr', '-cq', '23', '-b:v', '0', '-preset', 'p4'],
+            'high':     ['-rc', 'vbr', '-cq', '18', '-b:v', '0', '-preset', 'p7'],
         },
         'hevc_nvenc': {
-            'fast':     ['-cq', '33', '-preset', 'p1', '-tag:v', 'hvc1'],
-            'balanced': ['-cq', '28', '-preset', 'p4', '-tag:v', 'hvc1'],
-            'high':     ['-cq', '23', '-preset', 'p7', '-tag:v', 'hvc1'],
+            'fast':     ['-rc', 'vbr', '-cq', '33', '-b:v', '0', '-preset', 'p1', '-tag:v', 'hvc1'],
+            'balanced': ['-rc', 'vbr', '-cq', '28', '-b:v', '0', '-preset', 'p4', '-tag:v', 'hvc1'],
+            'high':     ['-rc', 'vbr', '-cq', '23', '-b:v', '0', '-preset', 'p7', '-tag:v', 'hvc1'],
         },
     }
 
     args = list(presets[encoder_type][quality_level])
 
     # libx264 and libx265 share CRF plus the ultrafast..veryslow preset names.
+    # NVENC uses the same 0-51 number as CQ. x264 preset names are not NVENC presets.
     if encoder_type in ('libx264', 'libx265'):
         if crf_override is not None:
             args[args.index('-crf') + 1] = str(crf_override)
         if preset_override is not None:
             args[args.index('-preset') + 1] = preset_override
+    elif encoder_type in ('nvenc', 'hevc_nvenc') and crf_override is not None:
+        args[args.index('-cq') + 1] = str(crf_override)
 
     return args
 

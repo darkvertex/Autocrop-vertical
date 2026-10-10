@@ -1,8 +1,10 @@
 name: CI
 
 # Pull requests run pytest and a Cog image smoke test in parallel.
-# The Cog job builds the image exactly as release does, then runs one CPU
-# prediction to prove setup() works with the baked-in weights. Nothing is pushed.
+# The Cog job builds the image exactly as release does, then runs one
+# prediction to prove setup() works with the baked-in weights. GitHub-hosted
+# runners have no NVIDIA driver, so encoder=hw falls back to libx264.
+# Nothing is pushed.
 
 on:
   pull_request:
