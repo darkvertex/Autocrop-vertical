@@ -4,7 +4,7 @@
 # driver. T4 and L40S have an NVENC engine; A100 and H100 do not, and the
 # pipeline falls back to libx264 / libx265 after a failed session probe.
 # cuda is pinned because Cog 0.22's compatibility matrix stops at torch 2.11
-# and this image keeps the CPU torch wheel (YOLO runs once per scene).
+# and this image keeps the CPU torch wheel (YOLO and BlazeFace run on CPU).
 image: r8.im/darkvertex/autocrop-vertical
 
 build:
