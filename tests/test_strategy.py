@@ -5,6 +5,7 @@ import pytest
 
 from main import (
     ProcessingError,
+    build_encoder_args,
     calculate_crop_box,
     decide_cropping_strategy,
     detect_scenes,
@@ -80,6 +81,29 @@ def test_crop_box_clamps_right_edge():
     assert y1 == 0 and y2 == 1080
     assert x2 == 1920
     assert x1 == 1920 - int(1080 * 9 / 16)
+
+
+def test_quality_presets_pick_crf_and_x264_preset():
+    assert build_encoder_args("libx264", "fast") == ["-crf", "28", "-preset", "veryfast"]
+    assert build_encoder_args("libx264", "balanced") == ["-crf", "23", "-preset", "fast"]
+    assert build_encoder_args("libx264", "high") == ["-crf", "18", "-preset", "slow"]
+
+
+def test_crf_and_preset_override_quality():
+    args = build_encoder_args("libx264", "balanced", crf_override=20, preset_override="medium")
+    assert args == ["-crf", "20", "-preset", "medium"]
+
+
+def test_hardware_presets_ignore_libx264_overrides():
+    args = build_encoder_args("nvenc", "fast", crf_override=10, preset_override="slow")
+    assert args == ["-cq", "28", "-preset", "p1"]
+
+
+def test_unknown_encoder_fails_before_decoding(tmp_path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"not a video")
+    with pytest.raises(ProcessingError, match="Unsupported encoder"):
+        process_video(str(source), str(tmp_path / "out.mp4"), encoder="not-an-encoder")
 
 
 def test_process_video_missing_input(tmp_path):

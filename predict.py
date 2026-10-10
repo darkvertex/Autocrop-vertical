@@ -73,6 +73,14 @@ class Predictor(BasePredictor):
             ge=0,
             le=8,
         ),
+        encoder: str = Input(
+            description=(
+                "Video encoder. 'auto' uses libx264. 'hw' uses VideoToolbox or NVENC when "
+                "this machine has one, otherwise libx264. CRF and preset overrides apply to libx264."
+            ),
+            default="auto",
+            choices=["auto", "libx264", "hw"],
+        ),
     ) -> Path:
         """Crop the video to a vertical frame, tracking people when they fit."""
         suffix = LocalPath(str(video)).suffix or ".mp4"
@@ -91,7 +99,7 @@ class Predictor(BasePredictor):
             preset=None if preset == "auto" else preset,
             frame_skip=int(frame_skip),
             downscale=int(downscale),
-            encoder="auto",
+            encoder=encoder,
         )
         if not result or not os.path.isfile(result):
             raise RuntimeError("Processing finished without writing an output video.")

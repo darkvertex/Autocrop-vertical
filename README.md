@@ -213,20 +213,26 @@ cog predict r8.im/darkvertex/autocrop-vertical \
   -i video=@./horizontal.mp4 \
   -i ratio=4:5 \
   -i quality=high \
+  -i crf=20 \
+  -i preset=medium \
+  -i encoder=libx264 \
   -o ./vertical.mp4
 ```
+
+`quality`, `crf`, `preset`, and `encoder` are the same encoding controls as the CLI. `crf` and `preset` replace the values chosen by `quality` for libx264. `-1` and `auto` leave that preset alone.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `video` | (required) | Horizontal video. Prefix local files with `@`. |
 | `ratio` | `9:16` | Output aspect ratio as `W:H` (`4:5`, `1:1`, …). |
-| `quality` | `balanced` | `fast`, `balanced`, or `high`. |
-| `crf` | `-1` | libx264 CRF override, 0–51. `-1` keeps the quality preset. |
-| `preset` | `auto` | libx264 preset override. `auto` keeps the quality preset. |
+| `quality` | `balanced` | `fast` (CRF 28, veryfast), `balanced` (CRF 23, fast), or `high` (CRF 18, slow). |
+| `crf` | `-1` | libx264 CRF override, 0–51, lower is higher quality. `-1` keeps the quality preset. |
+| `preset` | `auto` | libx264 preset override (`ultrafast` … `veryslow`). `auto` keeps the quality preset. |
+| `encoder` | `auto` | `auto` or `libx264` uses software x264. `hw` uses VideoToolbox or NVENC when the machine has it. |
 | `frame_skip` | `0` | Frames skipped during scene detection. |
 | `downscale` | `0` | Scene-detection downscale. `0` is automatic. |
 
-The encoder inside the image is libx264 (`--encoder` stays `auto`). Hardware encoders are a local-CLI option.
+This image is built for CPU, so `hw` resolves to libx264 here. A local checkout can still pass `--encoder h264_videotoolbox` or `--encoder h264_nvenc`.
 
 ### Push your own build
 
@@ -258,6 +264,7 @@ uvx --from poethepoet poe cog-deploy
 *   **Hosted Cog model.** `cog.yaml` and `predict.py` run the same pipeline as the CLI. Weights are baked into the image. CI builds the image and smoke-tests a short vertical encode; pushes to `main` publish `r8.im/darkvertex/autocrop-vertical`.
 *   **uv project.** `requirements.txt` is replaced by `pyproject.toml` and `uv.lock`. Dependencies install with `uv sync`. PyTorch resolves from the CPU wheel index.
 *   **Single-shot videos.** Scene detection now treats a video with no cuts as one scene, so a clip without a camera change still gets cropped.
+*   **Encoding controls on the API.** `quality`, `crf`, `preset`, and `encoder` are inputs on the Replicate model, matching the CLI flags.
 
 
 
