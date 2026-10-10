@@ -93,5 +93,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg
+
       - name: pytest
         run: uv run pytest -q
