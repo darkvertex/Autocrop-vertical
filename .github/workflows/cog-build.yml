@@ -1,0 +1,97 @@
+name: CI
+
+# Pull requests run pytest and a Cog image smoke test in parallel.
+# The Cog job builds the image exactly as release does, then runs one
+# prediction to prove setup() works with the baked-in weights. GitHub-hosted
+# runners have no NVIDIA driver, so encoder=hw falls back to libx264.
+# Nothing is pushed.
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  workflow_dispatch:
+
+env:
+  COG_VERSION: v0.22.0
+  IMAGE_TAG: autocrop-vertical:ci
+
+jobs:
+  build:
+    name: cog build + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          docker-images: false
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Cog
+        uses: ./.github/actions/setup-cog
+        with:
+          cog-version: ${{ env.COG_VERSION }}
+
+      - name: cog build
+        run: cog build -t "$IMAGE_TAG"
+
+      - name: Report image size
+        run: |
+          docker image inspect "$IMAGE_TAG" --format 'Image size: {{ .Size }} bytes'
+
+      - name: Generate sample video
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg
+          ffmpeg -y -f lavfi -i "testsrc=duration=2:size=640x360:rate=30" \
+            -f lavfi -i "sine=frequency=440:duration=2" \
+            -shortest -c:v libx264 -pix_fmt yuv420p -c:a aac /tmp/sample.mp4
+
+      - name: cog predict smoke test
+        run: cog predict "$IMAGE_TAG" -i video=@/tmp/sample.mp4 -o /tmp/output.mp4
+
+      - name: Validate output
+        run: |
+          python3 - <<'EOF'
+          import json, subprocess
+          raw = subprocess.check_output([
+              "ffprobe", "-v", "error",
+              "-show_entries", "stream=codec_type,width,height",
+              "-of", "json", "/tmp/output.mp4",
+          ], text=True)
+          data = json.loads(raw)
+          videos = [s for s in data["streams"] if s.get("codec_type") == "video"]
+          audios = [s for s in data["streams"] if s.get("codec_type") == "audio"]
+          assert videos, data
+          width, height = int(videos[0]["width"]), int(videos[0]["height"])
+          assert height > width, (width, height)
+          assert abs((width / height) - (9 / 16)) < 0.02, (width, height)
+          assert audios, "expected an audio stream"
+          print(f"OK: {width}x{height} with audio")
+          EOF
+
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: pytest
+        run: uv run pytest -q

@@ -1,0 +1,54 @@
+[project]
+name = "autocrop-vertical"
+version = "1.5.0"
+description = "Smart horizontal-to-vertical video cropper for TikTok, Reels, and Shorts"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "opencv-python>=4.8,<5.0",
+    "scenedetect[opencv]>=0.6,<0.7",
+    "ultralytics>=8.0,<9.0",
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "tqdm>=4.66",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+# Cog image tasks — run with: uvx --from poethepoet poe cog-deploy
+[tool.poe.tasks.cog-build]
+help = "Build the Cog Docker image"
+cmd = "cog build"
+
+[tool.poe.tasks.cog-push]
+help = "Push the Cog image to Replicate"
+cmd = "cog push"
+
+[tool.poe.tasks.cog-deploy]
+help = "Build the Cog image, then push it to Replicate"
+sequence = ["cog-build", "cog-push"]
+
+# ── uv configuration ──────────────────────────────────────────────────────────
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+# CPU PyTorch wheels for local runs and pytest. The Cog image is a GPU
+# build so NVENC can run; YOLO still uses this CPU wheel (one frame per scene).
+index-strategy = "unsafe-first-match"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

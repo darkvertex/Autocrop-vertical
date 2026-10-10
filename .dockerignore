@@ -1,0 +1,30 @@
+# https://docs.docker.com/engine/reference/builder/#dockerignore-file
+
+# Exclude Git files
+**/.git
+**/.github
+**/.gitignore
+
+# Exclude Python tooling
+.python-version
+
+# Exclude Python cache files
+__pycache__
+.mypy_cache
+.pytest_cache
+.ruff_cache
+
+# Exclude Python virtual environment
+/venv
+/.venv
+
+# Weights are downloaded into the image by a build.run step in cog.yaml.
+# A local copy here would bloat the build context.
+*.pt
+
+# Demo media and source videos are not used at runtime
+*.mp4
+*.gif
+*.mov
+*.mkv
+.DS_Store

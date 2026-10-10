@@ -1,0 +1,30 @@
+# Replicate image for AutoCrop-Vertical.
+# GPU so FFmpeg can open h264_nvenc / hevc_nvenc. Cog's GPU image sets
+# NVIDIA_DRIVER_CAPABILITIES=all, which mounts libnvidia-encode from the host
+# driver. T4 and L40S have an NVENC engine; A100 and H100 do not, and the
+# pipeline falls back to libx264 / libx265 after a failed session probe.
+# cuda is pinned because Cog 0.22's compatibility matrix stops at torch 2.11
+# and this image keeps the CPU torch wheel (YOLO runs once per scene).
+image: r8.im/darkvertex/autocrop-vertical
+
+build:
+  gpu: true
+  cuda: "12.8"
+  python_version: "3.12"
+  system_packages:
+    - ffmpeg
+    - libgl1
+    - libglib2.0-0
+    - libsm6
+    - libxext6
+    - libxrender1
+    - libgomp1
+  python_requirements: replicate-requirements.txt
+  # Bake the weights into the image so cold boots do no network I/O.
+  # These run before `COPY . /src`, so the weights layer is cached independently
+  # of code changes. Paths must be absolute: WORKDIR is not /src at this point.
+  run:
+    - mkdir -p /src/models && curl -fsSL -o /src/models/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt
+    - test "$(stat -c%s /src/models/yolov8n.pt)" -gt 6000000
+
+predict: "predict.py:Predictor"
