@@ -1,0 +1,25 @@
+# Replicate image for AutoCrop-Vertical.
+# CPU: scene detection, per-frame crop, and libx264 dominate runtime.
+# YOLOv8n runs on one frame per scene, so a GPU machine is not worth the cost.
+image: r8.im/darkvertex/autocrop-vertical
+
+build:
+  gpu: false
+  python_version: "3.12"
+  system_packages:
+    - ffmpeg
+    - libgl1
+    - libglib2.0-0
+    - libsm6
+    - libxext6
+    - libxrender1
+    - libgomp1
+  python_requirements: replicate-requirements.txt
+  # Bake the weights into the image so cold boots do no network I/O.
+  # These run before `COPY . /src`, so the weights layer is cached independently
+  # of code changes. Paths must be absolute: WORKDIR is not /src at this point.
+  run:
+    - mkdir -p /src/models && curl -fsSL -o /src/models/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt
+    - test "$(stat -c%s /src/models/yolov8n.pt)" -gt 6000000
+
+predict: "predict.py:Predictor"

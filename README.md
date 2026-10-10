@@ -11,18 +11,19 @@ Instead of a static center crop, the script analyzes each scene using AI (YOLOv8
 ### Quick Start
 
 ```bash
-git clone https://github.com/kamilstanuch/AutoCrop-Vertical.git
-cd AutoCrop-Vertical
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-python3 main.py -i video.mp4 -o vertical.mp4
+git clone https://github.com/darkvertex/Autocrop-vertical.git
+cd Autocrop-vertical
+uv sync
+uv run python main.py -i video.mp4 -o vertical.mp4
 ```
+
+Install [uv](https://docs.astral.sh/uv/) if you don't have it. `uv sync` creates `.venv` and installs the dependencies from `pyproject.toml` / `uv.lock`, including CPU PyTorch wheels.
 
 The `yolov8n.pt` model weights are downloaded automatically on first run.
 
-**Prerequisites:** Python 3.8+ and [FFmpeg](https://ffmpeg.org/) (`ffmpeg` + `ffprobe`) in your PATH.
+**Prerequisites:** Python 3.12+ and [FFmpeg](https://ffmpeg.org/) (`ffmpeg` + `ffprobe`) in your PATH.
+
+Hosted runs go through [Replicate](#replicate-cog) and do not need a local Python install.
 
 ---
 
@@ -30,25 +31,25 @@ The `yolov8n.pt` model weights are downloaded automatically on first run.
 
 ```bash
 # Basic — 9:16 vertical, balanced quality
-python3 main.py -i video.mp4 -o vertical.mp4
+uv run python main.py -i video.mp4 -o vertical.mp4
 
 # Instagram feed (4:5) with high quality
-python3 main.py -i video.mp4 -o vertical.mp4 --ratio 4:5 --quality high
+uv run python main.py -i video.mp4 -o vertical.mp4 --ratio 4:5 --quality high
 
 # Fast encode, square format
-python3 main.py -i video.mp4 -o vertical.mp4 --ratio 1:1 --quality fast
+uv run python main.py -i video.mp4 -o vertical.mp4 --ratio 1:1 --quality fast
 
 # Preview the processing plan without encoding
-python3 main.py -i video.mp4 -o vertical.mp4 --plan-only
+uv run python main.py -i video.mp4 -o vertical.mp4 --plan-only
 
 # Full control over encoding parameters
-python3 main.py -i video.mp4 -o vertical.mp4 --crf 20 --preset medium
+uv run python main.py -i video.mp4 -o vertical.mp4 --crf 20 --preset medium
 
 # Use hardware encoder (macOS VideoToolbox / NVIDIA NVENC)
-python3 main.py -i video.mp4 -o vertical.mp4 --encoder hw
+uv run python main.py -i video.mp4 -o vertical.mp4 --encoder hw
 
 # Maximum accuracy scene detection (slower)
-python3 main.py -i video.mp4 -o vertical.mp4 --frame-skip 0
+uv run python main.py -i video.mp4 -o vertical.mp4 --frame-skip 0
 ```
 
 ---
@@ -184,7 +185,81 @@ This script is built on a pipeline that uses specialized libraries for each step
 
 ---
 
+### Replicate (Cog)
+
+This fork publishes a Cog image at [replicate.com/darkvertex/autocrop-vertical](https://replicate.com/darkvertex/autocrop-vertical). Local `cog predict` and that hosted model return the same vertical mp4.
+
+The image is CPU-only. Scene detection, the per-frame crop, and libx264 are the slow parts; YOLOv8n runs on a single frame per scene. The build downloads `yolov8n.pt` in `cog.yaml`, so cold boots do no network I/O. `predict.py` sets `YOLO_OFFLINE=1` and refuses to start if those weights are missing.
+
+Install the [Cog CLI](https://cog.run/getting-started/) and Docker.
+
+**Published image** (no local `cog build`):
+
+```bash
+cog predict r8.im/darkvertex/autocrop-vertical -i video=@./horizontal.mp4 -o ./vertical.mp4
+```
+
+**Build from this checkout**, then predict with the image named in `cog.yaml`:
+
+```bash
+cog build
+cog predict -i video=@./horizontal.mp4 -o ./vertical.mp4
+```
+
+Optional inputs use the same names as the Replicate API:
+
+```bash
+cog predict r8.im/darkvertex/autocrop-vertical \
+  -i video=@./horizontal.mp4 \
+  -i ratio=4:5 \
+  -i quality=high \
+  -o ./vertical.mp4
+```
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `video` | (required) | Horizontal video. Prefix local files with `@`. |
+| `ratio` | `9:16` | Output aspect ratio as `W:H` (`4:5`, `1:1`, …). |
+| `quality` | `balanced` | `fast`, `balanced`, or `high`. |
+| `crf` | `-1` | libx264 CRF override, 0–51. `-1` keeps the quality preset. |
+| `preset` | `auto` | libx264 preset override. `auto` keeps the quality preset. |
+| `frame_skip` | `0` | Frames skipped during scene detection. |
+| `downscale` | `0` | Scene-detection downscale. `0` is automatic. |
+
+The encoder inside the image is libx264 (`--encoder` stays `auto`). Hardware encoders are a local-CLI option.
+
+### Push your own build
+
+After `cog login` (CLI auth token from https://replicate.com/auth/token, not an `r8_…` API token):
+
+```bash
+cog push r8.im/darkvertex/autocrop-vertical
+```
+
+Or another destination: `cog push r8.im/<your-username>/autocrop-vertical`.
+
+From a checkout with [uv](https://docs.astral.sh/uv/) and Cog on your PATH:
+
+```bash
+uvx --from poethepoet poe cog-deploy
+```
+
+### GitHub Actions
+
+- `.github/workflows/cog-build.yml` runs on every pull request: `pytest` and `cog build` plus a CPU `cog predict` smoke test, in parallel. Nothing is pushed.
+- `.github/workflows/cog-release.yml` runs on every push to `main` (or manually): `cog build` then `cog push`. It runs in the `production` GitHub Environment and needs the secret `REPLICATE_CLI_AUTH_TOKEN` defined there (Settings > Environments > production). The value must be the CLI auth token copied from https://replicate.com/auth/token, not an API token (`r8_...`) from the account settings page: `cog login` rejects API tokens. The job fails early with a clear message if the secret is missing or is an API token.
+
+---
+
 ### Changelog
+
+#### v1.5.0 — Replicate model and uv
+
+*   **Hosted Cog model.** `cog.yaml` and `predict.py` run the same pipeline as the CLI. Weights are baked into the image. CI builds the image and smoke-tests a short vertical encode; pushes to `main` publish `r8.im/darkvertex/autocrop-vertical`.
+*   **uv project.** `requirements.txt` is replaced by `pyproject.toml` and `uv.lock`. Dependencies install with `uv sync`. PyTorch resolves from the CPU wheel index.
+*   **Single-shot videos.** Scene detection now treats a video with no cuts as one scene, so a clip without a camera change still gets cropped.
+
+
 
 #### v1.4.1 (2026-02-15) — Cropping Accuracy Fix
 
