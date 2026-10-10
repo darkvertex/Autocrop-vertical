@@ -12,17 +12,6 @@ from cog import BasePredictor, Input, Path
 from main import get_face_cascade, get_yolo_model, process_video
 
 WEIGHTS_PATH = os.environ.get("YOLO_WEIGHTS", "/src/models/yolov8n.pt")
-X264_PRESETS = [
-    "ultrafast",
-    "superfast",
-    "veryfast",
-    "faster",
-    "fast",
-    "medium",
-    "slow",
-    "slower",
-    "veryslow",
-]
 
 
 class Predictor(BasePredictor):
@@ -62,7 +51,18 @@ class Predictor(BasePredictor):
         preset: str = Input(
             description="libx264 or libx265 preset override. 'auto' keeps the quality preset.",
             default="auto",
-            choices=["auto", *X264_PRESETS],
+            choices=[
+                "auto",
+                "ultrafast",
+                "superfast",
+                "veryfast",
+                "faster",
+                "fast",
+                "medium",
+                "slow",
+                "slower",
+                "veryslow",
+            ],
         ),
         frame_skip: int = Input(
             description="Frames to skip during scene detection. 0 processes every frame.",
