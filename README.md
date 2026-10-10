@@ -4,7 +4,7 @@
 
 Automatically converts horizontal videos into vertical format for TikTok, Instagram Reels, and YouTube Shorts.
 
-Instead of a static center crop, the script analyzes each scene using AI (YOLOv8), detects people, and decides whether to crop tightly on the subjects or letterbox to preserve the full shot.
+Instead of a static center crop, the script follows people through each scene and, when a shot is too wide to crop, keeps the full picture sharp on a blurred fill of the same frame.
 
 ---
 
@@ -103,10 +103,11 @@ HEVC uses a CRF about 5 higher than H.264, which keeps the same quality name in 
 
 ### Key Features
 
-*   **Content-Aware Cropping:** YOLOv8 detects people and centers the vertical frame on them.
-*   **Automatic Letterboxing:** When people are too spread out for a vertical crop, black bars are added to preserve the full shot.
-*   **Scene-by-Scene Processing:** Decisions are made per scene for consistent, logical edits.
-*   **Native Resolution:** Output height matches the source to prevent quality loss from upscaling.
+*   **Content-Aware Cropping:** BlazeFace follows the subject through the scene. YOLOv8 is the fallback when no face is found. The camera holds still inside a center safe zone, ignores a single wild detection, and cuts (rather than pans) onto the first face after a scene change.
+*   **Wide shots:** When nobody fits in the vertical crop, the full picture stays sharp and centered over an intentionally blurred copy of the same frame. That blur is a background treatment, not a quality loss from scaling.
+*   **Tight groups:** Two people who still fit in the vertical window are kept together. The camera follows the centre of the group.
+*   **Scene-by-Scene Processing:** Five samples per scene choose the layout. Near-black fade frames are ignored. A short scene whose neighbors agree is kept on that layout so the frame does not flap.
+*   **Delivery size:** The crop is scaled up to 1080px wide when it would otherwise be narrower, which is the usual Shorts upload size. Sources that are already wider are not scaled down. A source that is already vertical is passed through.
 *   **Frame-Accurate Processing:** Every frame is processed individually with the correct per-scene strategy — no timestamp rounding or scene boundary drift.
 *   **H.264 and HEVC:** `--encoder hevc` writes H.265 with libx265. `--encoder hw` and `--encoder hevc_hw` use VideoToolbox or NVENC when a one-frame session opens, and otherwise fall back to libx264 or libx265.
 *   **VFR Handling:** Variable frame rate sources are automatically normalized before processing.
@@ -127,20 +128,22 @@ Input Video
                 |
                 v
 +-------------------------------+
-| 2. Content Analysis           |  YOLOv8 detects people in each scene's
-|    (middle frame per scene)   |  middle frame; Haar cascade finds faces
+| 2. Content Analysis           |  Five frames per scene. YOLOv8 person
+|                               |  boxes decide whether the group fits;
+|                               |  BlazeFace covers a missed face
 +---------------+---------------+
                 |
                 v
 +-------------------------------+
-| 3. Strategy Decision          |  Per scene: TRACK (crop on subject)
-|                               |  or LETTERBOX (scale + black bars)
+| 3. Strategy Decision          |  Per scene: TRACK (follow subject or
+|                               |  a tight group) or WIDE (sharp picture
+|                               |  on a blurred fill)
 +---------------+---------------+
                 |
                 v
 +-------------------------------+
-| 4. Frame Processing           |  Per-frame crop/scale/pad via OpenCV
-|    (--quality, --encoder)     |  piped to FFmpeg for encoding
+| 4. Frame Processing           |  Smoothed crop, or the wide-shot
+|    (--quality, --encoder)     |  composite, piped to FFmpeg
 +---------------+---------------+
                 |
                 v
@@ -165,7 +168,7 @@ Benchmarks on Apple M1 MacBook Pro (AC power):
 | 1280x720 | 49s | ~6s | 8.3x real-time |
 | 1920x1080 | 12 min | ~51s | 13.7x real-time |
 
-Scene detection is the dominant bottleneck (~50% of total time).
+Scene detection is the dominant bottleneck (~50% of total time). Those timings are for a static crop. Following the subject also runs face detection while frames are encoded, so a tracked scene takes longer.
 
 ---
 
@@ -175,17 +178,18 @@ This script is built on a pipeline that uses specialized libraries for each step
 
 *   **Core Libraries:**
     *   `PySceneDetect`: For accurate, content-aware scene cut detection.
-    *   `Ultralytics (YOLOv8)`: For fast and reliable person detection.
-    *   `OpenCV`: Used for frame manipulation, face detection (as a fallback), and reading video properties.
+    *   `Ultralytics (YOLOv8)`: Person detection for the fit test, and a fallback when no face is visible.
+    *   `MediaPipe BlazeFace`: Face tracking while the camera is following someone.
+    *   `OpenCV`: Frame reads, the wide-shot composite, and video properties.
     *   `FFmpeg` / `ffprobe`: The backbone of video encoding, audio extraction, and media stream analysis.
     *   `tqdm`: For clean and informative progress bars in the console.
 
 *   **Processing Pipeline:**
     1.  **(Pre-processing)** If the source is VFR, it is normalized to constant frame rate.
     2.  `PySceneDetect` scans the video and returns a list of scene timestamps.
-    3.  For each scene, `OpenCV` extracts a sample frame and `YOLOv8` detects people in it.
-    4.  A set of rules determines the strategy (`TRACK` or `LETTERBOX`) for each scene based on the number and position of detected people.
-    5.  OpenCV reads every frame sequentially. Each frame is cropped/resized (TRACK) or scaled/padded (LETTERBOX) according to its scene's strategy, then piped as raw pixels to FFmpeg for encoding. This frame-by-frame approach guarantees frame-accurate scene boundaries with no timestamp rounding errors.
+    3.  For each scene, five frames are sampled. `YOLOv8` measures whether the people fit in the vertical crop. A frame with no person falls back to `BlazeFace`. Near-black frames are skipped.
+    4.  A set of rules chooses `TRACK` (one person, or a group that fits) or `WIDE` (nobody, or a group that does not fit).
+    5.  OpenCV reads every frame sequentially. `TRACK` scenes follow the subject with a smoothed camera (BlazeFace every 4th frame, YOLOv8 when no face is found). `WIDE` scenes keep a sharp picture on a blurred fill. Frames are piped as raw pixels to FFmpeg. Scene boundaries stay on exact frame numbers.
     6.  Audio is extracted separately (with start-time offset correction), then merged with the processed video.
 
 ---
@@ -194,7 +198,7 @@ This script is built on a pipeline that uses specialized libraries for each step
 
 This fork publishes a Cog image at [replicate.com/darkvertex/autocrop-vertical](https://replicate.com/darkvertex/autocrop-vertical). Local `cog predict` and that hosted model return the same vertical mp4.
 
-The image is a GPU build (`gpu: true`, CUDA 12.8) so FFmpeg can open NVENC. PyTorch stays on the CPU wheel: YOLOv8n runs on one frame per scene, and the GPU is there for `h264_nvenc` and `hevc_nvenc`. Set the model hardware to an Nvidia T4 or L40S. Those cards have an NVENC engine. A100 and H100 have decode only, and `hw` / `hevc_hw` fall back to libx264 / libx265 after a failed session probe. The build downloads `yolov8n.pt` in `cog.yaml`, so cold boots do no network I/O. `predict.py` sets `YOLO_OFFLINE=1` and refuses to start if those weights are missing.
+The image is a GPU build (`gpu: true`, CUDA 12.8) so FFmpeg can open NVENC. PyTorch stays on the CPU wheel: YOLOv8n and BlazeFace run on CPU, and the GPU is there for `h264_nvenc` and `hevc_nvenc`. Set the model hardware to an Nvidia T4 or L40S. Those cards have an NVENC engine. A100 and H100 have decode only, and `hw` / `hevc_hw` fall back to libx264 / libx265 after a failed session probe. The build downloads `yolov8n.pt` in `cog.yaml`, so cold boots do no network I/O. `predict.py` sets `YOLO_OFFLINE=1` and refuses to start if those weights are missing.
 
 Install the [Cog CLI](https://cog.run/getting-started/) and Docker.
 
@@ -261,6 +265,12 @@ uvx --from poethepoet poe cog-deploy
 ---
 
 ### Changelog
+
+#### Vertical tracking
+
+*   **The crop follows the subject.** BlazeFace runs every 4th frame. The camera stays still while the person remains near the centre, waits for a large jump to repeat before following it, and cuts to the new subject at a scene change. YOLOv8 still decides whether a group fits, and fills in when no face is found.
+*   **Wide shots use a blurred fill.** The sharp picture sits on a blurred copy of the same frame. The blur is drawn as the background. It is not caused by scaling.
+*   **1080-wide delivery.** A crop narrower than 1080px is scaled up. Wider sources are left alone. A video that is already vertical is passed through.
 
 #### v1.5.0 — Replicate model and uv
 

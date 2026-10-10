@@ -11,6 +11,7 @@ dependencies = [
     "torch>=2.2",
     "torchvision>=0.17",
     "tqdm>=4.66",
+    "mediapipe==0.10.14",
 ]
 
 [dependency-groups]
@@ -36,8 +37,11 @@ sequence = ["cog-build", "cog-push"]
 [tool.uv]
 package = false
 default-groups = ["dev"]
+# MediaPipe depends on opencv-contrib-python with no upper bound. Pin it to
+# the same 4.x release as opencv-python so the two wheels do not pull in OpenCV 5.
+override-dependencies = ["opencv-contrib-python==4.14.0.94"]
 # CPU PyTorch wheels for local runs and pytest. The Cog image is a GPU
-# build so NVENC can run; YOLO still uses this CPU wheel (one frame per scene).
+# build so NVENC can run; YOLO and BlazeFace still use CPU.
 index-strategy = "unsafe-first-match"
 
 [[tool.uv.index]]

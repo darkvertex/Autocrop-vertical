@@ -9,14 +9,15 @@ from pathlib import Path as LocalPath
 
 from cog import BasePredictor, Input, Path
 
-from main import get_face_cascade, get_yolo_model, process_video
+from main import get_yolo_model, process_video
+from tracking import get_face_detector
 
 WEIGHTS_PATH = os.environ.get("YOLO_WEIGHTS", "/src/models/yolov8n.pt")
 
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
-        """Load YOLO and the face cascade. Weights must already be on disk."""
+        """Load YOLO and BlazeFace. Weights must already be on disk."""
         os.environ["YOLO_OFFLINE"] = "1"
         if not os.path.isfile(WEIGHTS_PATH):
             raise RuntimeError(
@@ -25,7 +26,7 @@ class Predictor(BasePredictor):
             )
         os.environ["YOLO_WEIGHTS"] = WEIGHTS_PATH
         get_yolo_model(WEIGHTS_PATH)
-        get_face_cascade()
+        get_face_detector()
 
     def predict(
         self,

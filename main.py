@@ -15,7 +15,6 @@ X264_PRESETS = (
 # or running --help doesn't trigger heavyweight model loading.
 _model = None
 _model_path = None
-_face_cascade = None
 
 
 class ProcessingError(RuntimeError):
@@ -50,58 +49,6 @@ def get_yolo_model(weights_path=None):
         _model = YOLO(path)
         _model_path = path
     return _model
-
-def get_face_cascade():
-    global _face_cascade
-    if _face_cascade is None:
-        import cv2
-        _face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    return _face_cascade
-
-def analyze_scene_content(video_path, scene_start_time, scene_end_time):
-    """
-    Analyzes the middle frame of a scene to detect people and faces.
-    """
-    import cv2
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Error: Could not open video {video_path}")
-        return []
-
-    start_frame = scene_start_time.get_frames()
-    end_frame = scene_end_time.get_frames()
-    middle_frame_number = int(start_frame + (end_frame - start_frame) / 2)
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame_number)
-
-    ret, frame = cap.read()
-    if not ret:
-        cap.release()
-        return []
-
-    results = get_yolo_model()([frame], verbose=False)
-
-    detected_objects = []
-
-    for result in results:
-        boxes = result.boxes
-        for box in boxes:
-            if box.cls[0] == 0:
-                x1, y1, x2, y2 = [int(i) for i in box.xyxy[0]]
-                person_box = [x1, y1, x2, y2]
-
-                person_roi_gray = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
-                faces = get_face_cascade().detectMultiScale(person_roi_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-
-                face_box = None
-                if len(faces) > 0:
-                    fx, fy, fw, fh = faces[0]
-                    face_box = [x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh]
-
-                detected_objects.append({'person_box': person_box, 'face_box': face_box})
-
-    cap.release()
-    return detected_objects
 
 
 def detect_scenes(video_path, downscale=0, frame_skip=0):
@@ -525,6 +472,64 @@ def build_encoder_args(encoder_type, quality_level, crf_override=None, preset_ov
 
     return args
 
+
+def _layout_label(strategy):
+    """User-facing name. LETTERBOX is the wide shot: sharp picture on a blurred fill."""
+    if strategy == "LETTERBOX":
+        return "WIDE"
+    return strategy
+
+
+def _render_frame(
+    frame, strategy, mode, frame_number, scene_start,
+    cameraman, speaker_tracker, frame_width,
+    output_width, output_height,
+):
+    """Crop with the smoothed camera, or compose the wide-shot backdrop."""
+    import cv2
+    import tracking
+
+    if strategy != "TRACK":
+        cameraman.current_center_x = frame_width / 2
+        cameraman.target_center_x = frame_width / 2
+        return tracking.render_wide_frame(frame, output_width, output_height)
+
+    if mode == "passthrough":
+        if frame.shape[1] == output_width and frame.shape[0] == output_height:
+            return frame
+        return cv2.resize(frame, (output_width, output_height), interpolation=cv2.INTER_LINEAR)
+
+    is_scene_start = frame_number == scene_start
+    detect_now = frame_number % tracking.DETECT_STRIDE == 0 or (is_scene_start and tracking.SCENE_CUT_RESET)
+    if is_scene_start and tracking.SCENE_CUT_RESET:
+        speaker_tracker.reset()
+        cameraman.begin_scene()
+
+    if detect_now:
+        candidates = tracking.detect_face_candidates(frame)
+        yolo_now = frame_number % tracking.YOLO_FALLBACK_STRIDE == 0 or (is_scene_start and tracking.SCENE_CUT_RESET)
+        if mode == "group":
+            target_box = tracking.group_target(candidates)
+            if target_box is None and yolo_now:
+                target_box = tracking.largest_person_upper(frame)
+            if target_box:
+                cameraman.update_target(target_box)
+        else:
+            target_box = speaker_tracker.get_target(candidates, frame_number, frame_width)
+            if target_box:
+                cameraman.update_target(target_box)
+            elif yolo_now:
+                person_box = tracking.largest_person_upper(frame)
+                if person_box:
+                    cameraman.update_target(person_box)
+
+    x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
+    if y2 > y1 and x2 > x1:
+        cropped = frame[y1:y2, x1:x2]
+        return cv2.resize(cropped, (output_width, output_height), interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(frame, (output_width, output_height), interpolation=cv2.INTER_LINEAR)
+
+
 def process_video(
     input_path,
     output_path,
@@ -654,42 +659,56 @@ def process_video(
         # frame-rate mismatches between the reader and encoder that cause audio drift.
         original_width, original_height, fps = get_video_properties(input_video)
     
-        OUTPUT_HEIGHT = original_height
-        if OUTPUT_HEIGHT % 2 != 0:
-            OUTPUT_HEIGHT += 1
-        OUTPUT_WIDTH = int(OUTPUT_HEIGHT * aspect_ratio)
-        if OUTPUT_WIDTH % 2 != 0:
-            OUTPUT_WIDTH += 1
+        import tracking
+        # Scale a narrow crop up to 1080px wide. Wider sources stay at the crop size.
+        OUTPUT_WIDTH, OUTPUT_HEIGHT = tracking.delivery_size(
+            original_width, original_height, aspect_ratio
+        )
+        passthrough = tracking.source_already_fits(original_width, original_height, aspect_ratio)
 
         scenes_analysis = []
-        for i, (start_time, end_time) in enumerate(tqdm(scenes, desc="Analyzing Scenes")):
-            analysis = analyze_scene_content(input_video, start_time, end_time)
-            strategy, target_box = decide_cropping_strategy(analysis, original_height, aspect_ratio)
-            scenes_analysis.append({
-                'start_frame': start_time.get_frames(),
-                'end_frame': end_time.get_frames(),
-                'start_seconds': start_time.get_seconds(),
-                'end_seconds': end_time.get_seconds(),
-                'analysis': analysis,
-                'strategy': strategy,
-                'target_box': target_box
-            })
+        if passthrough:
+            print("   Source already matches the target aspect — passing it through.")
+            for start_time, end_time in scenes:
+                scenes_analysis.append({
+                    'start_frame': start_time.get_frames(),
+                    'end_frame': end_time.get_frames(),
+                    'start_seconds': start_time.get_seconds(),
+                    'end_seconds': end_time.get_seconds(),
+                    'strategy': 'TRACK',
+                    'mode': 'passthrough',
+                    'person_count': 0,
+                })
+        else:
+            layouts = tracking.analyze_video_layouts(
+                input_video, scenes, original_height, aspect_ratio, decide_cropping_strategy,
+            )
+            for (start_time, end_time), layout in zip(scenes, layouts):
+                scenes_analysis.append({
+                    'start_frame': start_time.get_frames(),
+                    'end_frame': end_time.get_frames(),
+                    'start_seconds': start_time.get_seconds(),
+                    'end_seconds': end_time.get_seconds(),
+                    'strategy': layout['strategy'],
+                    'mode': layout['mode'],
+                    'person_count': layout['person_count'],
+                })
         step_end_time = time.time()
         print(f"✅ Scene analysis complete in {step_end_time - step_start_time:.2f}s.")
 
         print("\n📋 Step 3: Generated Processing Plan")
         for i, scene_data in enumerate(scenes_analysis):
-            num_people = len(scene_data['analysis'])
-            strategy = scene_data['strategy']
+            num_people = scene_data['person_count']
+            strategy = _layout_label(scene_data['strategy'])
             start_time = scenes[i][0].get_timecode()
             end_time = scenes[i][1].get_timecode()
             print(f"  - Scene {i+1} ({start_time} -> {end_time}): Found {num_people} person(s). Strategy: {strategy}")
 
         if plan_only:
             track_count = sum(1 for s in scenes_analysis if s['strategy'] == 'TRACK')
-            letterbox_count = sum(1 for s in scenes_analysis if s['strategy'] == 'LETTERBOX')
+            wide_count = sum(1 for s in scenes_analysis if s['strategy'] == 'LETTERBOX')
             elapsed = time.time() - script_start_time
-            print(f"\n📊 Plan summary: {track_count} TRACK / {letterbox_count} LETTERBOX scenes")
+            print(f"\n📊 Plan summary: {track_count} TRACK / {wide_count} WIDE scenes")
             print(f"⏱️  Analysis took {elapsed:.1f}s. Run without --plan-only to encode.")
             return None
 
@@ -715,6 +734,10 @@ def process_video(
         current_scene_index = 0
         dropped_frames = 0
         last_output_frame = None
+        cameraman = tracking.SmoothedCameraman(
+            OUTPUT_WIDTH, OUTPUT_HEIGHT, original_width, original_height, aspect_ratio=aspect_ratio,
+        )
+        speaker_tracker = tracking.SpeakerTracker(cooldown_frames=30)
 
         num_scenes = len(scenes_analysis)
         with tqdm(total=total_frames, desc=f"Processing [scene 1/{num_scenes}]",
@@ -732,21 +755,14 @@ def process_video(
 
                 scene_data = scenes_analysis[current_scene_index]
                 strategy = scene_data['strategy']
-                target_box = scene_data['target_box']
+                mode = scene_data['mode']
 
                 try:
-                    if strategy == 'TRACK':
-                        crop_box = calculate_crop_box(target_box, original_width, original_height, aspect_ratio)
-                        processed_frame = frame[crop_box[1]:crop_box[3], crop_box[0]:crop_box[2]]
-                        output_frame = cv2.resize(processed_frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
-                    else:  # LETTERBOX
-                        scale_factor = OUTPUT_WIDTH / original_width
-                        scaled_height = int(original_height * scale_factor)
-                        scaled_frame = cv2.resize(frame, (OUTPUT_WIDTH, scaled_height))
-
-                        output_frame = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
-                        y_offset = (OUTPUT_HEIGHT - scaled_height) // 2
-                        output_frame[y_offset:y_offset + scaled_height, :] = scaled_frame
+                    output_frame = _render_frame(
+                        frame, strategy, mode, frame_number, scene_data['start_frame'],
+                        cameraman, speaker_tracker, original_width,
+                        OUTPUT_WIDTH, OUTPUT_HEIGHT,
+                    )
                     last_output_frame = output_frame
                 except Exception:
                     dropped_frames += 1
