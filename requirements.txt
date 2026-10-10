@@ -1,6 +1,0 @@
-opencv-python>=4.8,<5.0
-scenedetect[opencv]>=0.6,<0.7
-ultralytics>=8.0,<9.0
-torch>=2.0
-torchvision>=0.15
-tqdm>=4.60
