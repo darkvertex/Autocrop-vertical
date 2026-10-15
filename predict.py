@@ -1,10 +1,13 @@
 """Replicate Cog predictor for AutoCrop-Vertical.
 
 The image build downloads yolov8n.pt. setup() loads it once per worker so
-predictions do not touch the network.
+predictions do not touch the network. The Runpod handler calls this same
+Predictor. Each predict() call uses its own temp directory so a warm worker
+can run jobs one after another without sharing /tmp paths.
 """
 import os
 import shutil
+import tempfile
 from pathlib import Path as LocalPath
 
 from cog import BasePredictor, Input, Path
@@ -89,23 +92,26 @@ class Predictor(BasePredictor):
     ) -> Path:
         """Crop the video to a vertical frame, tracking people when they fit."""
         suffix = LocalPath(str(video)).suffix or ".mp4"
-        input_path = LocalPath("/tmp/autocrop-input").with_suffix(suffix)
-        shutil.copy(str(video), input_path)
-        output_path = LocalPath("/tmp/vertical.mp4")
-        if output_path.exists():
-            output_path.unlink()
-
-        result = process_video(
-            input_path=str(input_path),
-            output_path=str(output_path),
-            ratio=ratio,
-            quality=quality,
-            crf=None if crf < 0 else int(crf),
-            preset=None if preset == "auto" else preset,
-            frame_skip=int(frame_skip),
-            downscale=int(downscale),
-            encoder=encoder,
-        )
-        if not result or not os.path.isfile(result):
-            raise RuntimeError("Processing finished without writing an output video.")
-        return Path(result)
+        work = LocalPath(tempfile.mkdtemp(prefix="autocrop-"))
+        input_path = work / f"input{suffix}"
+        output_path = work / "vertical.mp4"
+        try:
+            shutil.copy(str(video), input_path)
+            result = process_video(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                ratio=ratio,
+                quality=quality,
+                crf=None if crf < 0 else int(crf),
+                preset=None if preset == "auto" else preset,
+                frame_skip=int(frame_skip),
+                downscale=int(downscale),
+                encoder=encoder,
+            )
+            if not result or not os.path.isfile(result):
+                raise RuntimeError("Processing finished without writing an output video.")
+            input_path.unlink(missing_ok=True)
+            return Path(result)
+        except Exception:
+            shutil.rmtree(work, ignore_errors=True)
+            raise

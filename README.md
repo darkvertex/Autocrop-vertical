@@ -23,7 +23,7 @@ The `yolov8n.pt` model weights are downloaded automatically on first run.
 
 **Prerequisites:** Python 3.12+ and [FFmpeg](https://ffmpeg.org/) (`ffmpeg` + `ffprobe`) in your PATH.
 
-Hosted runs go through [Replicate](#replicate-cog) and do not need a local Python install.
+Hosted runs go through [Replicate](#replicate-cog) or [Runpod Serverless](#runpod-serverless) and do not need a local Python install.
 
 ---
 
@@ -261,6 +261,56 @@ uvx --from poethepoet poe cog-deploy
 
 - `.github/workflows/cog-build.yml` runs on every pull request: `pytest` and `cog build` plus a `cog predict` smoke test, in parallel. Nothing is pushed. The GitHub runner has no NVIDIA driver, so the default `hw` encoder falls back to libx264 there.
 - `.github/workflows/cog-release.yml` runs on every push to `main` (or manually): `cog build` then `cog push`. It runs in the `production` GitHub Environment and needs the secret `REPLICATE_CLI_AUTH_TOKEN` defined there (Settings > Environments > production). The value must be the CLI auth token copied from https://replicate.com/auth/token, not an API token (`r8_...`) from the account settings page: `cog login` rejects API tokens. The job fails early with a clear message if the secret is missing or is an API token.
+
+### Runpod Serverless
+
+The root `Dockerfile` is a Runpod worker. It calls the same `Predictor` as the Cog model, in-process, with the same input names and defaults. `cog build` and `cog push` do not use that Dockerfile, so the Replicate image is unchanged.
+
+Replicate stops a prediction at 10 minutes. Runpod's endpoint default is also 10 minutes, and the default job TTL is 24 hours. A stock endpoint will kill a long encode the same way. In the endpoint's Advanced settings, set both of these to the platform maximum, 7 days (`604800000` milliseconds):
+
+- **Execution timeout** — how long the worker may run after it picks up the job.
+- **Job TTL** — lifespan from submit, including time spent in the queue. If TTL expires mid-encode, the job is deleted.
+
+Leave the idle timeout at 5 seconds. That only scales an idle worker down. It does not stop a running job.
+
+Use a GPU with an NVENC engine (Nvidia T4 or L40S). A100 and H100 have decode only, and `hw` / `hevc_hw` fall back to libx264 / libx265 after a failed session probe, same as on Replicate.
+
+Build and push a `linux/amd64` image, then create a Queue endpoint from it:
+
+```bash
+docker build --platform linux/amd64 -t your-registry/autocrop-vertical:runpod .
+docker push your-registry/autocrop-vertical:runpod
+```
+
+Submit with `/run`, then poll `/status`. `/runsync` holds the HTTP connection open and only keeps the result for about a minute, so it is the wrong call for a long encode. A request `policy` replaces the endpoint timeouts for that job, so set both to 7 days there too:
+
+```bash
+curl -X POST "https://api.runpod.ai/v2/ENDPOINT_ID/run" \
+  -H "authorization: Bearer RUNPOD_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{
+    "input": {
+      "video": "https://example.com/horizontal.mp4",
+      "ratio": "9:16"
+    },
+    "policy": {
+      "executionTimeout": 604800000,
+      "ttl": 604800000
+    }
+  }'
+```
+
+`video` is an `https` URL, a base64 string (or a `data:...;base64,` URI), or a file path on a mounted network volume. Optional fields match the [Replicate inputs](#replicate-cog): `ratio`, `quality`, `crf`, `preset`, `frame_skip`, `downscale`, and `encoder`.
+
+`/run` results are kept for 30 minutes and the response body is capped at 10 MB, so a finished mp4 is returned in one of three ways:
+
+| Result | When |
+| --- | --- |
+| `video_url` | `BUCKET_ENDPOINT_URL`, `BUCKET_ACCESS_KEY_ID`, and `BUCKET_SECRET_ACCESS_KEY` are set on the endpoint. Optional `BUCKET_NAME` selects the bucket; otherwise the Runpod SDK uses a month-year name. |
+| `video_path` | A network volume is mounted at `/runpod-volume`. The file is copied to `/runpod-volume/outputs/<job_id>.mp4`. |
+| `video_base64` | Neither of the above is set and the file is at most 7 MB, or the input sets `return_base64` to `true` for a file under that size. Larger files return an error naming the other two options. |
+
+The handler does not add its own time limit around the download or the encode.
 
 ---
 
